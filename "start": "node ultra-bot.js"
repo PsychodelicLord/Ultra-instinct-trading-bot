@@ -1,0 +1,8 @@
+{
+  "name": "kalshi-bot",
+  "version": "1.0.0",
+  "main": "Ultra-bot.js",
+  "scripts": {
+    "start": "node Ultra-bot.js"
+  }
+}

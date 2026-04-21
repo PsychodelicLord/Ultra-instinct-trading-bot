@@ -1,0 +1,16 @@
+{
+  "name": "ultra-instinct-trading-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx app.ts",
+    "dev": "tsx watch app.ts",
+    "smoke": "node --import tsx ./scripts/smoke-check.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.18",
+    "tsx": "^4.20.6",
+    "typescript": "^5.8.3"
+  }
+}

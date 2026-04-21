@@ -1,7 +1,7 @@
 import crypto from "crypto";
-import { db, tradesTable, botLogsTable } from "@workspace/db";
+import { db, tradesTable, botLogsTable } from "./db";
 import { logger } from "./logger";
-import { eq, gte, sql } from "drizzle-orm";
+import { eq, gte, sql } from "./query-helpers";
 
 const KALSHI_BASE = "https://api.elections.kalshi.com/trade-api/v2";
 const API_KEY_ID = process.env.KALSHI_API_KEY ?? "";

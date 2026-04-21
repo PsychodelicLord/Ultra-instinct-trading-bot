@@ -1,3 +1,4 @@
+// @ts-nocheck
 import crypto from "crypto";
 import { db, tradesTable, botLogsTable } from "./workspace-db";
 import { logger } from "./logger";

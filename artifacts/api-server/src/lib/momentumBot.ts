@@ -19,7 +19,7 @@
 import { kalshiFetch, getBotState, refreshBalance, setTradeClosedHook, setPositionRemovedHook } from "./kalshi-bot";
 import { logger } from "./logger";
 import { db, tradesTable, botLogsTable, momentumSettingsTable, paperTradesTable } from "@workspace/db";
-import { eq, asc, desc } from "drizzle-orm";
+import { and, eq, asc, desc, gte } from "drizzle-orm";
 
 // ─── Constants ─────────────────────────────────────────────────────────────
 const ALLOWED_COINS = ["BTC", "ETH", "SOL", "DOGE", "XRP", "BNB"];
@@ -233,6 +233,51 @@ let sellTimer: NodeJS.Timeout | null = null;
 // Startup hold — blocks all trades for 60s after (re)start so DB recovery and
 // syncPortfolioFromKalshi can repopulate openPositions before any new entries fire.
 let startupHoldUntilMs = 0;
+
+async function restoreRecentCooldownsFromDb(): Promise<void> {
+  try {
+    const now = Date.now();
+    const lookbackMs = Math.max(COOLDOWN_MS, POST_LOSS_COOLDOWN_MS) + 60_000;
+    const since = new Date(now - lookbackMs);
+    const recentClosed = await db
+      .select({
+        marketId: tradesTable.marketId,
+        closedAt: tradesTable.closedAt,
+        pnlCents: tradesTable.pnlCents,
+      })
+      .from(tradesTable)
+      .where(and(eq(tradesTable.status, "closed"), gte(tradesTable.closedAt, since)))
+      .orderBy(desc(tradesTable.closedAt))
+      .limit(200);
+
+    let restoredCoinLocks = 0;
+    for (const t of recentClosed) {
+      if (!t.closedAt) continue;
+      const closedAtMs = new Date(t.closedAt).getTime();
+
+      const coinExpiry = closedAtMs + COOLDOWN_MS;
+      if (coinExpiry > now) {
+        const coin = coinLabel(t.marketId);
+        const prev = marketCooldowns.get(coin) ?? 0;
+        if (coinExpiry > prev) {
+          marketCooldowns.set(coin, coinExpiry);
+          restoredCoinLocks++;
+        }
+      }
+
+      const globalMs = (t.pnlCents ?? 0) < 0 ? POST_LOSS_COOLDOWN_MS : POST_WIN_COOLDOWN_MS;
+      const globalExpiry = closedAtMs + globalMs;
+      if (globalExpiry > globalCooldownUntilMs) globalCooldownUntilMs = globalExpiry;
+    }
+
+    if (restoredCoinLocks > 0 || globalCooldownUntilMs > now) {
+      const globalSecs = Math.max(0, Math.ceil((globalCooldownUntilMs - now) / 1000));
+      console.log(`[COOLDOWN RESTORE] restored ${restoredCoinLocks} coin lock(s), global cooldown ${globalSecs}s`);
+    }
+  } catch (err) {
+    warn(`[COOLDOWN RESTORE] failed: ${String(err)}`);
+  }
+}
 
 // ─── Bot Health Score rolling buffer ────────────────────────────────────────
 interface TradeRecord {
@@ -2110,6 +2155,7 @@ export function startMomentumBot(): MomentumBotState {
   // race condition where the bot re-enters coins it was already holding.
   startupHoldUntilMs = Date.now() + 60_000;
   console.log(`[STARTUP HOLD] No new trades for 60s — recovering open positions from DB and Kalshi`);
+  restoreRecentCooldownsFromDb().catch(err => warn(`[COOLDOWN RESTORE] unexpected error: ${String(err)}`));
 
   if (state.simulatorMode) {
     simPositions.length = 0;

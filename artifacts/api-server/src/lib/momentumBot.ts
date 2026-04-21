@@ -1591,13 +1591,22 @@ export async function scanMomentumMarkets(): Promise<void> {
   }
 
   // ── Phase 2: Rank signals and log leaderboard ─────────────────────────────
-  candidates.sort((a, b) => b.score - a.score);
-  if (candidates.length > 0) {
-    const board = candidates.slice(0, 5)
+  // Keep only the best candidate per coin to prevent same-coin stacking
+  // during a single scan cycle when multiple markets pass filters.
+  const bestByCoin = new Map<string, Candidate>();
+  for (const c of candidates) {
+    const coin = coinLabel(c.market.ticker);
+    const prev = bestByCoin.get(coin);
+    if (!prev || c.score > prev.score) bestByCoin.set(coin, c);
+  }
+  const rankedCandidates = Array.from(bestByCoin.values()).sort((a, b) => b.score - a.score);
+
+  if (rankedCandidates.length > 0) {
+    const board = rankedCandidates.slice(0, 5)
       .map(c => `${coinLabel(c.market.ticker)}(${c.score.toFixed(0)} ${c.side})`)
       .join(" > ");
-    console.log(`[RANKING] ${candidates.length} signals → best: ${board}`);
-    state.lastDecision = `${coinLabel(candidates[0].market.ticker)}: ${candidates[0].decision.action} — score:${candidates[0].score.toFixed(0)}`;
+    console.log(`[RANKING] ${rankedCandidates.length} signals → best: ${board}`);
+    state.lastDecision = `${coinLabel(rankedCandidates[0].market.ticker)}: ${rankedCandidates[0].decision.action} — score:${rankedCandidates[0].score.toFixed(0)}`;
     state.lastDecisionAt = new Date().toISOString();
   }
 
@@ -1606,7 +1615,7 @@ export async function scanMomentumMarkets(): Promise<void> {
   // even if Kalshi's API hasn't updated the balance yet after the first trade.
   let reservedBetCents = 0;
 
-  for (const candidate of candidates) {
+  for (const candidate of rankedCandidates) {
     if (activePositions.length >= MAX_POSITIONS) break;
 
     // Safety guard — if bot was stopped between Phase 1 and Phase 3, abort
@@ -1616,6 +1625,43 @@ export async function scanMomentumMarkets(): Promise<void> {
     }
 
     const { market, ob, side, decision } = candidate;
+    const marketCoin = coinLabel(market.ticker);
+
+    // Final execution-time guards (authoritative): enforce dashboard constraints
+    // again right before order placement so stale candidates can never bypass config.
+    const activeNow = state.simulatorMode ? simPositions : openPositions;
+    if (activeNow.length >= MAX_POSITIONS) {
+      console.log(`[EXECUTE BLOCKED] max positions reached (${activeNow.length}/${MAX_POSITIONS})`);
+      break;
+    }
+    if (!state.allowedCoins.includes(marketCoin)) {
+      console.log(`[EXECUTE BLOCKED] ${marketCoin} removed from allowedCoins during scan`);
+      continue;
+    }
+    if (activeNow.some(p => coinLabel(p.marketId) === marketCoin)) {
+      console.log(`[EXECUTE BLOCKED] ${marketCoin} already has an open position`);
+      continue;
+    }
+    const cooldown = marketCooldowns.get(marketCoin);
+    if (cooldown && Date.now() < cooldown) {
+      console.log(`[EXECUTE BLOCKED] ${marketCoin} cooldown active (${Math.ceil((cooldown - Date.now()) / 1000)}s left)`);
+      continue;
+    }
+    const minRequired = state.simulatorMode ? MIN_MINUTES_REMAINING_SIM : MIN_MINUTES_REMAINING;
+    const actualMinutesLeft = market.closeTs > 0 ? (market.closeTs - Date.now()) / 60_000 : -1;
+    if (actualMinutesLeft < minRequired) {
+      console.log(`[EXECUTE BLOCKED] ${marketCoin} only ${actualMinutesLeft.toFixed(1)}min left (< ${minRequired}min)`);
+      continue;
+    }
+    const tradeSpreadLimit = state.simulatorMode ? TRADE_SPREAD_MAX_SIM : TRADE_SPREAD_MAX;
+    if (ob.spread > tradeSpreadLimit) {
+      console.log(`[EXECUTE BLOCKED] ${marketCoin} spread ${ob.spread}¢ > ${tradeSpreadLimit}¢`);
+      continue;
+    }
+    if (ob.mid < state.priceMin || ob.mid > state.priceMax) {
+      console.log(`[EXECUTE BLOCKED] ${marketCoin} mid ${ob.mid}¢ outside configured range ${state.priceMin}-${state.priceMax}¢`);
+      continue;
+    }
 
     // ── Signal-strength variable sizing ──────────────────────────────────────
     // Velocity-based sizing: fast moves (≥0.2¢/s) = full bet; slower = 70%; health gates on top
@@ -2020,18 +2066,22 @@ export async function updateMomentumConfig(cfg: Partial<MomentumBotConfig>): Pro
   if (cfg.balanceFloorCents !== undefined) state.balanceFloorCents = cfg.balanceFloorCents;
   if (cfg.maxSessionLossCents !== undefined) state.maxSessionLossCents = cfg.maxSessionLossCents;
   if (cfg.consecutiveLossLimit !== undefined) state.consecutiveLossLimit = cfg.consecutiveLossLimit;
-  if (cfg.betCostCents !== undefined) state.betCostCents = cfg.betCostCents;
+  if (cfg.betCostCents !== undefined) state.betCostCents = Math.max(1, Math.min(cfg.betCostCents, 2000));
   if (cfg.simulatorMode !== undefined) state.simulatorMode = cfg.simulatorMode;
   if (cfg.priceMin !== undefined) state.priceMin = Math.max(1, Math.min(cfg.priceMin, 99));
   if (cfg.priceMax !== undefined) state.priceMax = Math.max(1, Math.min(cfg.priceMax, 99));
+  if (state.priceMin > state.priceMax) {
+    const oldMin = state.priceMin;
+    state.priceMin = state.priceMax;
+    state.priceMax = oldMin;
+  }
   if (cfg.tpCents !== undefined) state.tpCents = Math.max(1, cfg.tpCents);
   if (cfg.slCents !== undefined) state.slCents = Math.max(1, cfg.slCents);
   if (cfg.staleMs !== undefined) state.staleMs = Math.max(10_000, cfg.staleMs);
   if (cfg.tpAbsoluteCents !== undefined) state.tpAbsoluteCents = Math.max(0, cfg.tpAbsoluteCents);
   if (cfg.sessionProfitTargetCents !== undefined) state.sessionProfitTargetCents = Math.max(0, cfg.sessionProfitTargetCents);
-  if (cfg.allowedCoins !== undefined && cfg.allowedCoins.length > 0) {
+  if (cfg.allowedCoins !== undefined) {
     state.allowedCoins = cfg.allowedCoins.filter(c => ALLOWED_COINS.includes(c));
-    if (state.allowedCoins.length === 0) state.allowedCoins = [...ALLOWED_COINS]; // never allow empty list
   }
   await saveConfigFieldsOnly(); // awaited — guarantees DB write before Railway can restart
 }

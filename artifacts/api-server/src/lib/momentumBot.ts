@@ -16,7 +16,7 @@
  *  - Use max_close_ts to surface short-duration crypto markets
  */
 
-import { kalshiFetch, getBotState, refreshBalance, setTradeClosedHook } from "./kalshi-bot";
+import { kalshiFetch, getBotState, refreshBalance, setTradeClosedHook, setPositionRemovedHook } from "./kalshi-bot";
 import { logger } from "./logger";
 import { db, tradesTable, botLogsTable, momentumSettingsTable, paperTradesTable } from "@workspace/db";
 import { eq, asc, desc } from "drizzle-orm";
@@ -2045,6 +2045,9 @@ export function startMomentumBot(): MomentumBotState {
 
   // Wire up real-trade W/L counter (hook avoids circular import)
   setTradeClosedHook(recordTradeResult);
+  setPositionRemovedHook(({ marketId }) => {
+    marketCooldowns.set(coinLabel(marketId), Date.now() + COOLDOWN_MS);
+  });
   state.sessionPnlCents = 0;
   state.sessionWins = 0;
   state.sessionLosses = 0;
@@ -2177,6 +2180,7 @@ export function stopMomentumBot(reason = "Manually stopped via dashboard"): Mome
 
   if (scanTimer) { clearInterval(scanTimer); scanTimer = null; }
   if (sellTimer) { clearInterval(sellTimer); sellTimer = null; }
+  setPositionRemovedHook(null);
 
   // Record any open real positions as losses so the W/L counter stays honest
   if (openPositions.length > 0) {

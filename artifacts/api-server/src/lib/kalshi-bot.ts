@@ -18,6 +18,27 @@ function fireTradeClosedHook(entry: number, exit: number, pnl: number) {
   try { _onTradeClosed?.(entry, exit, pnl); } catch (_) {}
 }
 
+export type PositionRemovedReason =
+  | "confirmed_sell"
+  | "cancelled_buy"
+  | "manual_sell"
+  | "market_expired_or_settled";
+
+export interface PositionRemovedEvent {
+  tradeId: number;
+  marketId: string;
+  side: "YES" | "NO";
+  reason: PositionRemovedReason;
+}
+
+let _onPositionRemoved: ((event: PositionRemovedEvent) => void) | null = null;
+export function setPositionRemovedHook(fn: ((event: PositionRemovedEvent) => void) | null) {
+  _onPositionRemoved = fn;
+}
+function firePositionRemovedHook(event: PositionRemovedEvent) {
+  try { _onPositionRemoved?.(event); } catch (_) {}
+}
+
 // ─── Kalshi API config ───────────────────────────────────────────────────────
 const KALSHI_BASE = "https://api.elections.kalshi.com/trade-api/v2";
 const API_KEY_ID = process.env.KALSHI_API_KEY ?? "";
@@ -780,6 +801,20 @@ interface OpenPosition {
 
 const openPositions: OpenPosition[] = [];
 
+function removeOpenPosition(
+  pos: OpenPosition,
+  reason: PositionRemovedReason,
+  opts?: { removeFromOpenMarkets?: boolean },
+): boolean {
+  const idx = openPositions.findIndex((p) => p.tradeId === pos.tradeId);
+  if (idx < 0) return false;
+  openPositions.splice(idx, 1);
+  if (opts?.removeFromOpenMarkets !== false) openMarkets.delete(pos.marketId);
+  state.openPositionCount = openPositions.length;
+  firePositionRemovedHook({ tradeId: pos.tradeId, marketId: pos.marketId, side: pos.side, reason });
+  return true;
+}
+
 // Called immediately after a trade is inserted to DB so the monitor picks it up.
 export function registerOpenPosition(pos: OpenPosition): OpenPosition {
   if (!openPositions.some(p => p.tradeId === pos.tradeId)) {
@@ -848,10 +883,7 @@ async function executeSell(
   const fee       = Math.floor(botConfig.feeRate * Math.max(0, gross));
   const netPnl    = gross - fee;
 
-  const idx = openPositions.findIndex(p => p.tradeId === pos.tradeId);
-  if (idx >= 0) openPositions.splice(idx, 1);
-  openMarkets.delete(pos.marketId);
-  state.openPositionCount = openPositions.length;
+  removeOpenPosition(pos, "confirmed_sell");
 
   await botLog("info",
     `✅ SELL EXECUTED — Trade ${pos.tradeId} | fill ~${fillPrice}¢ | net ${netPnl >= 0 ? "+" : ""}${netPnl}¢`,
@@ -1048,10 +1080,7 @@ export async function retryOpenPositions(): Promise<void> {
               const gross     = fillPrice - pos.entryPriceCents;
               const fee       = Math.floor(botConfig.feeRate * Math.max(0, gross));
               const netPnl    = gross - fee;
-              const idxP = openPositions.findIndex(p => p.tradeId === pos.tradeId);
-              if (idxP >= 0) openPositions.splice(idxP, 1);
-              openMarkets.delete(pos.marketId);
-              state.openPositionCount = openPositions.length;
+              removeOpenPosition(pos, "confirmed_sell");
               fireTradeClosedHook(pos.entryPriceCents, fillPrice, netPnl);
               refreshDailyPnl().catch(() => {});
               if (pos.tradeId > 0) {
@@ -1091,10 +1120,7 @@ export async function retryOpenPositions(): Promise<void> {
 
             if (resting) {
               try { await kalshiFetch("DELETE", `/portfolio/orders/${pos.buyOrderId}`); } catch (_) {}
-              const idx = openPositions.findIndex(p => p.tradeId === pos.tradeId);
-              if (idx >= 0) openPositions.splice(idx, 1);
-              openMarkets.delete(pos.marketId);
-              state.openPositionCount = openPositions.length;
+              removeOpenPosition(pos, "cancelled_buy");
               // DB write — fire-and-forget, non-blocking
               if (pos.tradeId > 0) {
                 db.update(tradesTable)
@@ -1133,12 +1159,10 @@ export async function retryOpenPositions(): Promise<void> {
               }
             } catch (_) { /* fill lookup failed — use zero */ }
 
-            const idx = openPositions.findIndex(p => p.tradeId === pos.tradeId);
-            if (idx >= 0) openPositions.splice(idx, 1);
+            removeOpenPosition(pos, "manual_sell", { removeFromOpenMarkets: false });
             // NOTE: intentionally NOT deleting from openMarkets — keeps this market period
             // locked so the bot cannot immediately re-buy the same market after a manual sell.
             // The lock expires naturally when a new 15-min period begins (different market ID).
-            state.openPositionCount = openPositions.length;
             // DB write — fire-and-forget
             if (pos.tradeId > 0) {
               db.update(tradesTable).set({
@@ -1171,10 +1195,7 @@ export async function retryOpenPositions(): Promise<void> {
             ? (() => { const g = 100 - pos.entryPriceCents; return g - Math.floor(botConfig.feeRate * g); })()
             : -pos.entryPriceCents;
 
-          const idx = openPositions.findIndex(p => p.tradeId === pos.tradeId);
-          if (idx >= 0) openPositions.splice(idx, 1);
-          openMarkets.delete(pos.marketId);
-          state.openPositionCount = openPositions.length;
+          removeOpenPosition(pos, "market_expired_or_settled");
           // DB write — fire-and-forget
           if (pos.tradeId > 0) {
             db.update(tradesTable).set({

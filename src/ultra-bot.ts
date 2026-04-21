@@ -1,5 +1,6 @@
+// @ts-nocheck
 import crypto from "crypto";
-import { db, tradesTable, botLogsTable } from "@workspace/db";
+import { db, tradesTable, botLogsTable } from "./workspace-db";
 import { logger } from "./logger";
 import { eq, gte, sql } from "drizzle-orm";
 

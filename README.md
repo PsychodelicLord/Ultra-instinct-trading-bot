@@ -1,2 +1,28 @@
 # Ultra-instinct-trading-bot
-Connects with kalshi api key snd private key to buy and sell 15 m btc markets 24/7 , cashing out early getting chnage all day
+
+Development setup for a local runnable bot service.
+
+## Prerequisites
+
+- Node.js 22+
+- npm 10+
+
+## Install
+
+npm install
+
+## Run (development)
+
+npm run dev
+
+The service starts on `http://localhost:3000` with endpoints:
+
+- `GET /health`
+- `GET /config`
+- `PATCH /config`
+- `GET /state`
+
+## Build and run production bundle
+
+npm run build
+npm start

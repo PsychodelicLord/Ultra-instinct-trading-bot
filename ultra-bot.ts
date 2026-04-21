@@ -104,6 +104,40 @@ let scanTimer: NodeJS.Timeout | null = null;
 let sellTimer: NodeJS.Timeout | null = null;
 let balanceTimer: NodeJS.Timeout | null = null;
 
+export type PositionRemovalReason =
+  | "cancelled_buy"
+  | "market_settled_or_expired"
+  | "confirmed_sell"
+  | "force_expired";
+
+export type PositionRemovedEvent = {
+  tradeId: number;
+  marketId: string;
+  side: string;
+  reason: PositionRemovalReason;
+};
+
+type PositionRemovedHook = (event: PositionRemovedEvent) => void | Promise<void>;
+let onPositionRemovedHook: PositionRemovedHook | null = null;
+
+export function setPositionRemovedHook(hook: PositionRemovedHook | null): void {
+  onPositionRemovedHook = hook;
+}
+
+async function removeOpenMarketPosition(
+  trade: { id: number; marketId: string; side: string },
+  reason: PositionRemovalReason,
+): Promise<void> {
+  openMarkets.delete(trade.marketId);
+  state.openPositionCount = openMarkets.size;
+  if (!onPositionRemovedHook) return;
+  try {
+    await onPositionRemovedHook({ tradeId: trade.id, marketId: trade.marketId, side: trade.side, reason });
+  } catch (err) {
+    logger.warn({ err, tradeId: trade.id, marketId: trade.marketId, reason }, "position-removed-hook failed");
+  }
+}
+
 const KALSHI_PATH_PREFIX = "/trade-api/v2";
 
 function signRequest(method: string, path: string, timestampMs: number): string {
@@ -383,8 +417,7 @@ export async function retryOpenPositions(): Promise<void> {
           if (definitelyUnfilled) {
             try { await kalshiFetch("DELETE", `/portfolio/orders/${trade.kalshiBuyOrderId}`); } catch (_) {}
             await db.update(tradesTable).set({ status: "cancelled", closedAt: new Date() }).where(eq(tradesTable.id, trade.id));
-            openMarkets.delete(trade.marketId);
-            state.openPositionCount = openMarkets.size;
+            await removeOpenMarketPosition(trade, "cancelled_buy");
             await botLog("warn", `🚫 Trade ${trade.id} cancelled — buy order still ${status} after 60s`, { tradeId: trade.id });
             continue;
           } else if (!filled) {
@@ -414,8 +447,7 @@ export async function retryOpenPositions(): Promise<void> {
             logMsg = `⚠️ Trade ${trade.id} market closed — marking expired`;
           }
           await db.update(tradesTable).set({ status: settled && ourSideWon ? "closed" : "expired", pnlCents, closedAt: new Date() }).where(eq(tradesTable.id, trade.id));
-          openMarkets.delete(trade.marketId);
-          state.openPositionCount = openMarkets.size;
+          await removeOpenMarketPosition(trade, "market_settled_or_expired");
           await botLog(ourSideWon ? "info" : "warn", logMsg, { tradeId: trade.id });
           continue;
         }
@@ -450,8 +482,7 @@ export async function retryOpenPositions(): Promise<void> {
                 const fee = Math.floor(botConfig.feeRate * Math.max(0, gross));
                 const netPnl = gross - fee;
                 await db.update(tradesTable).set({ status: "closed", sellPriceCents: fillPrice, pnlCents: netPnl, feeCents: fee, closedAt: new Date() }).where(eq(tradesTable.id, trade.id));
-                openMarkets.delete(trade.marketId);
-                state.openPositionCount = openMarkets.size;
+                await removeOpenMarketPosition(trade, "confirmed_sell");
                 await botLog("info", `✅ Sell filled — trade ${trade.id} closed at ${fillPrice}¢, net ${netPnl>=0?"+":""}${netPnl}¢`, { tradeId: trade.id });
               } else {
                 await botLog("info", `📋 Trade ${trade.id}: resting sell @ ${targetSellPrice}¢ pending | bid ${currentBid}¢ | ${minsLeft.toFixed(1)}min left`);
@@ -491,8 +522,7 @@ export async function retryOpenPositions(): Promise<void> {
         await botLog("warn", `Failed to check position ${trade.id}`, String(err));
         if (tradeAgeMs > 20 * 60_000) {
           await db.update(tradesTable).set({ status: "expired", pnlCents: -trade.buyPriceCents, closedAt: new Date() }).where(eq(tradesTable.id, trade.id));
-          openMarkets.delete(trade.marketId);
-          state.openPositionCount = openMarkets.size;
+          await removeOpenMarketPosition(trade, "force_expired");
           await botLog("warn", `⚠️ Trade ${trade.id} force-expired after 20min`, { tradeId: trade.id });
         }
       }
